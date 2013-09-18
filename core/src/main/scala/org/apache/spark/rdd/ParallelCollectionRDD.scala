@@ -78,19 +78,25 @@ private[spark] class ParallelCollectionPartition[T: ClassManifest](
   }
 }
 
+/** @param data The data to be processed. Instances of this class do not hold a reference once the
+  *             data are partitioned, so caller may free some memory by not holding a reference to
+  *             `data`.
+  */
 private[spark] class ParallelCollectionRDD[T: ClassManifest](
     @transient sc: SparkContext,
-    @transient data: Seq[T],
+    @transient private[this] var data: Seq[T],
     numSlices: Int,
     locationPrefs: Map[Int, Seq[String]])
     extends RDD[T](sc, Nil) {
+  require(numSlices >= 1, "Positive number of slices required")
+
   // TODO: Right now, each split sends along its full data, even if later down the RDD chain it gets
   // cached. It might be worthwhile to write the data to a file in the DFS and read it in the split
   // instead.
   // UPDATE: A parallel collection can be checkpointed to HDFS, which achieves this goal.
 
   override def getPartitions: Array[Partition] = {
-    val slices = ParallelCollectionRDD.slice(data, numSlices).toArray
+    val slices = slice().toArray
     slices.indices.map(i => new ParallelCollectionPartition(id, i, slices(i))).toArray
   }
 
@@ -99,6 +105,27 @@ private[spark] class ParallelCollectionRDD[T: ClassManifest](
 
   override def getPreferredLocations(s: Partition): Seq[String] = {
     locationPrefs.getOrElse(s.index, Nil)
+  }
+
+  /** Whether `data` has been sliced. */
+  private[this] var sliced = false
+
+  /** The slices of `data`, if `sliced` is true. */
+  @transient private[this] var slices: Seq[Seq[T]] = _
+
+  /**
+   * Slice `data` into `numSlices` sub-collections.
+   * 
+   * The `data` reference will be released (nulled) on return.
+   * @return The slices of `data`.
+   */
+  private[this] def slice(): Seq[Seq[T]] = {
+    if (sliced) return slices
+
+    slices = ParallelCollectionRDD.slice(data, numSlices)
+    sliced = true
+    data = null
+    slices
   }
 }
 
@@ -109,9 +136,6 @@ private object ParallelCollectionRDD {
    * it efficient to run Spark over RDDs representing large sets of numbers.
    */
   def slice[T: ClassManifest](seq: Seq[T], numSlices: Int): Seq[Seq[T]] = {
-    if (numSlices < 1) {
-      throw new IllegalArgumentException("Positive number of slices required")
-    }
     seq match {
       case r: Range.Inclusive => {
         val sign = if (r.step < 0) {
