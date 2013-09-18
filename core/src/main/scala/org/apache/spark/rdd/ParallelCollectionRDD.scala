@@ -164,6 +164,19 @@ private object ParallelCollectionRDD {
         }
         slices
       }
+      case v: Vector[_] => {
+        var s = seq
+        val length = s.length
+        val sliceSize = length / numSlices + (if (length % numSlices == 0) 0 else 1)
+        val slices = (0 until numSlices).map(i => {
+          val (slice, tail) = s.splitAt(sliceSize)
+          s = tail  // release the head of the split
+          slice.toArray  // copy to a smaller data structure
+          	.toSeq
+        })
+        assert(s.isEmpty)
+        slices
+      }
       case _ => {
         val array = seq.toArray // To prevent O(n^2) operations for List etc
         (0 until numSlices).map(i => {
